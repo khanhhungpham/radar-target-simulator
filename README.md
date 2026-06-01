@@ -15,7 +15,7 @@ This repository provides tools to simulate radar targets and visualize radar cov
 ### Installation
 
 ```bash
-pip install
+pip install geopy
 ```
 
 ### Usage
@@ -33,7 +33,7 @@ python3 simulate_radar_targets.py
 ### Installation
 
 ```bash
-pip install
+pip install matplotlib geographiclib
 ```
 
 ### Usage
