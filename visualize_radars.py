@@ -1,6 +1,7 @@
+import json
 import os
 import sys
-import json
+
 import matplotlib.pyplot as plt
 import numpy as np
 from geographiclib.geodesic import Geodesic
@@ -33,30 +34,56 @@ colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
 for i, radar in enumerate(radars):
     lon, lat, r_km = radar["lon"], radar["lat"], radar["range_km"]
     color = colors[i % len(colors)]
-    
+
     circle_lats = []
     circle_lons = []
-    
+
     # Quét 360 độ tạo ra 120 điểm mút chính xác mặt cầu
     for azimuth in np.linspace(0, 360, 120):
         result = geod.Direct(lat, lon, azimuth, r_km * 1000)
-        circle_lats.append(result['lat2'])
-        circle_lons.append(result['lon2'])
-    
+        circle_lats.append(result["lat2"])
+        circle_lons.append(result["lon2"])
+
     circle_lons = np.array(circle_lons)
     circle_lats = np.array(circle_lats)
 
     # Vẽ vùng quét đổ màu (Gán label ở đây để tránh trùng lặp trong Legend)
-    ax.fill(circle_lons, circle_lats, color=color, alpha=0.15, label=f"Radar {radar['id']} ({r_km}km)")
+    ax.fill(
+        circle_lons,
+        circle_lats,
+        color=color,
+        alpha=0.15,
+        label=f"Radar {radar['id']} ({r_km}km)",
+    )
     # Vẽ đường viền
     ax.plot(circle_lons, circle_lats, color=color, linewidth=1.2, linestyle="-")
-    
+
     # Vẽ tâm radar (Dùng ký tự hình tam giác đại diện cho trạm radar)
-    ax.plot(lon, lat, marker="^", color=color, markersize=8, markeredgecolor='black', markeredgewidth=0.5)
-    ax.text(lon, lat, f" R{radar['id']}", fontsize=10, fontweight="bold", verticalalignment='bottom')
+    ax.plot(
+        lon,
+        lat,
+        marker="^",
+        color=color,
+        markersize=8,
+        markeredgecolor="black",
+        markeredgewidth=0.5,
+    )
+    ax.text(
+        lon,
+        lat,
+        f" R{radar['id']}",
+        fontsize=10,
+        fontweight="bold",
+        verticalalignment="bottom",
+    )
 
 # 4. Định dạng biểu đồ tự động
-ax.set_title("Trực quan hóa vùng phủ radar (Mô hình Trái Đất WGS84)", fontsize=13, pad=15, fontweight="bold")
+ax.set_title(
+    "Trực quan hóa vùng phủ radar (Mô hình Trái Đất WGS84)",
+    fontsize=13,
+    pad=15,
+    fontweight="bold",
+)
 ax.set_xlabel("Kinh độ (Longitude - Degree)")
 ax.set_ylabel("Vĩ độ (Latitude - Degree)")
 ax.grid(True, linestyle="--", alpha=0.5)
@@ -64,7 +91,7 @@ ax.grid(True, linestyle="--", alpha=0.5)
 # Tính toán tỷ lệ trục an toàn (Tránh lỗi chia cho 0)
 avg_lat = sum(r["lat"] for r in radars) / len(radars)
 # Giới hạn góc để hàm cos không tiến về 0 nếu radar đặt ở cực
-avg_lat = max(-85.0, min(85.0, avg_lat)) 
+avg_lat = max(-85.0, min(85.0, avg_lat))
 ax.set_aspect(1.0 / np.cos(np.radians(avg_lat)))
 
 # Hiển thị chú thích góc trên bên phải gọn gàng
