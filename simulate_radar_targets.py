@@ -101,6 +101,50 @@ def calculate_radar_detection(radar, target):
     return None
 
 
+def process_radar_detection(
+    radar, target, detection, min_angle, max_angle, normalized_max, timestamp_str
+):
+    """Kiểm tra góc quét sector và tính toán dữ liệu nhiễu cho mục tiêu."""
+    true_bearing = detection["bearing_deg"]
+
+    # Kiểm tra mục tiêu có nằm trong sector quét hiện tại hay không
+    if min_angle < max_angle and max_angle <= 360.0:
+        is_in_scan_sector = min_angle <= true_bearing < max_angle
+    else:
+        is_in_scan_sector = true_bearing >= min_angle or true_bearing < normalized_max
+
+    if not is_in_scan_sector:
+        return None
+
+    r_id = int(radar["id"])
+    true_id = target["true_id"]
+    local_id = true_id + r_id * 1000
+
+    # Thêm nhiễu Gaussian (Quy tắc 3-Sigma)
+    noise_dist_km = random.gauss(0, SIGMA_DIST_M) / 1000.0
+    noisy_dist = max(0.0, detection["distance_km"] + noise_dist_km)
+
+    noisy_bearing = (true_bearing + random.gauss(0, SIGMA_BEARING_DEG)) % 360.0
+    noisy_speed = max(0.0, target["speed_knots"] + random.gauss(0, SIGMA_SPEED_KNOTS))
+    noisy_course = (target["course"] + random.gauss(0, SIGMA_COURSE_DEG)) % 360.0
+
+    radar_pos = (radar["lat"], radar["lon"])
+    noisy_pos = distance(kilometers=noisy_dist).destination(radar_pos, noisy_bearing)
+
+    return [
+        timestamp_str,
+        r_id,
+        local_id,
+        true_id,
+        round(noisy_dist, 3),
+        round(noisy_bearing, 2),
+        round(noisy_speed, 2),
+        round(noisy_course, 2),
+        round(noisy_pos.latitude, 6),
+        round(noisy_pos.longitude, 6),
+    ]
+
+
 def main():
     config = load_input_config()
     radars = config["radars"]
@@ -141,7 +185,6 @@ def main():
             step_records = []
 
             for radar in radars:
-                r_id = int(radar["id"])
                 scan_period = radar["scan_period_s"]
 
                 current_position_in_cycle = step % scan_period
@@ -149,59 +192,20 @@ def main():
                 max_angle = ((current_position_in_cycle + 1) / scan_period) * 360.0
                 normalized_max = max_angle % 360.0
 
-                for t in targets:
-                    detection = calculate_radar_detection(radar, t)
+                for target in targets:
+                    detection = calculate_radar_detection(radar, target)
                     if detection:
-                        true_bearing = detection["bearing_deg"]
-
-                        if min_angle < max_angle and max_angle <= 360.0:
-                            is_in_scan_sector = min_angle <= true_bearing < max_angle
-                        else:
-                            is_in_scan_sector = (
-                                true_bearing >= min_angle
-                                or true_bearing < normalized_max
-                            )
-
-                        if is_in_scan_sector:
-                            true_id = t["true_id"]
-                            local_id = true_id + r_id * 1000
-
-                            # SỬ DỤNG HẰNG SỐ CHỮ HOA TOÀN CỤC Ở ĐÂY
-                            noise_dist_km = random.gauss(0, SIGMA_DIST_M) / 1000.0
-                            noisy_dist = max(
-                                0.0, detection["distance_km"] + noise_dist_km
-                            )
-
-                            noisy_bearing = (
-                                true_bearing + random.gauss(0, SIGMA_BEARING_DEG)
-                            ) % 360.0
-                            noisy_speed = max(
-                                0.0,
-                                t["speed_knots"] + random.gauss(0, SIGMA_SPEED_KNOTS),
-                            )
-                            noisy_course = (
-                                t["course"] + random.gauss(0, SIGMA_COURSE_DEG)
-                            ) % 360.0
-
-                            radar_pos = (radar["lat"], radar["lon"])
-                            noisy_pos = distance(kilometers=noisy_dist).destination(
-                                radar_pos, noisy_bearing
-                            )
-
-                            step_records.append(
-                                [
-                                    timestamp_str,
-                                    r_id,
-                                    local_id,
-                                    true_id,
-                                    round(noisy_dist, 3),
-                                    round(noisy_bearing, 2),
-                                    round(noisy_speed, 2),
-                                    round(noisy_course, 2),
-                                    round(noisy_pos.latitude, 6),
-                                    round(noisy_pos.longitude, 6),
-                                ]
-                            )
+                        record = process_radar_detection(
+                            radar,
+                            target,
+                            detection,
+                            min_angle,
+                            max_angle,
+                            normalized_max,
+                            timestamp_str,
+                        )
+                        if record:
+                            step_records.append(record)
 
             if step_records:
                 writer.writerows(step_records)
