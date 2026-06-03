@@ -8,9 +8,15 @@ from datetime import datetime, timedelta
 
 from geopy.distance import distance
 
+# --- CÁC HẰNG SỐ CẤU HÌNH NHIỄU SENSOR (QUY TẮC 3-SIGMA) ---
+SIGMA_DIST_M = 15.0 / 3.0  # Đơn vị: Mét (m)
+SIGMA_BEARING_DEG = 0.7 / 3.0  # Đơn vị: Độ (deg)
+SIGMA_SPEED_KNOTS = 3.0 / 3.0  # Đơn vị: Hải lý / giờ (knots)
+SIGMA_COURSE_DEG = 10.0 / 3.0  # Đơn vị: Độ (deg)
+
 
 def load_input_config(file_path="input.json"):
-    """Đọc cấu hình đầu vào từ file JSON. Nếu không có file, thông báo lỗi và thoát luôn."""
+    """Đọc cấu hình đầu vào từ file JSON."""
     if not os.path.exists(file_path):
         print(
             f"LỖI: Không tìm thấy file cấu hình '{file_path}'. Vui lòng tạo file trước khi chạy."
@@ -22,7 +28,7 @@ def load_input_config(file_path="input.json"):
 
 
 def generate_initial_targets(num_targets, radars):
-    """Khởi tạo mục tiêu nằm trong vùng quét của ít nhất một radar với góc rải đều 0-360."""
+    """Khởi tạo mục tiêu nằm trong vùng quét của ít nhất một radar."""
     targets = []
     for i in range(num_targets):
         ref_radar = random.choice(radars)
@@ -53,8 +59,7 @@ def generate_initial_targets(num_targets, radars):
 
 
 def update_target_positions(targets, dt):
-    """Cập nhật vị trí, vận tốc và hướng mục tiêu di chuyển thực tế (mô hình Smooth Random Walk)."""
-    # TỐI ƯU: Bỏ ép kiểu list(targets) không cần thiết để tăng hiệu năng giải phóng bộ nhớ
+    """Cập nhật vị trí, vận tốc và hướng mục tiêu di chuyển (Smooth Random Walk)."""
     for t in targets:
         course_change = random.uniform(-2.0, 2.0)
         t["course"] = (t["course"] + course_change) % 360.0
@@ -76,7 +81,7 @@ def update_target_positions(targets, dt):
 
 
 def calculate_radar_detection(radar, target):
-    """Tính toán thông số nếu mục tiêu nằm trong tầm quét."""
+    """Tính toán thông số nếu mục tiêu nằm trong tầm quét bằng Geopy (Độ chính xác cao)."""
     radar_pos = (radar["lat"], radar["lon"])
     target_pos = (target["lat"], target["lon"])
     dist_km = distance(radar_pos, target_pos).kilometers
@@ -123,97 +128,88 @@ def main():
         "lat",
         "lon",
     ]
-    detected_records = []
 
-    # CHỈNH SỬA: Đặt lại tên kèm hậu tố đơn vị rõ ràng dựa trên quy tắc 3-sigma
-    sigma_dist_m = 15.0 / 3.0  # Đơn vị: Mét (m)
-    sigma_bearing_deg = 0.7 / 3.0  # Đơn vị: Độ (deg)
-    sigma_speed_knots = 3.0 / 3.0  # Đơn vị: Hải lý / giờ (knots)
-    sigma_course_deg = 10.0 / 3.0  # Đơn vị: Độ (deg)
-
-    # Lặp tuần tự theo từng giây thực tế của mô phỏng
-    for step in range(duration + 1):
-        current_sim_time = start_time + timedelta(seconds=step)
-        timestamp_str = current_sim_time.strftime("%Y-%m-%d %H:%M:%S")
-
-        for radar in radars:
-            r_id = int(radar["id"])
-            scan_period = radar["scan_period_s"]
-
-            # Tính toán phân đoạn rẻ quạt mà anten quét qua ĐÚNG trong giây này
-            current_position_in_cycle = step % scan_period
-            min_angle = (current_position_in_cycle / scan_period) * 360.0
-            max_angle = ((current_position_in_cycle + 1) / scan_period) * 360.0
-
-            for t in targets:
-                detection = calculate_radar_detection(radar, t)
-                if detection:
-                    true_bearing = detection["bearing_deg"]
-
-                    # ĐÃ SỬA LOGIC: Kiểm tra góc quét an toàn kể cả khi max_angle vượt quá hoặc chạm mốc 360 độ
-                    is_in_scan_sector = False
-                    normalized_max = max_angle % 360.0
-
-                    if min_angle < max_angle and max_angle <= 360.0:
-                        is_in_scan_sector = min_angle <= true_bearing < max_angle
-                    else:  # Trường hợp quét vắt qua mốc 360 độ về lại 0 độ
-                        is_in_scan_sector = (
-                            true_bearing >= min_angle or true_bearing < normalized_max
-                        )
-
-                    if is_in_scan_sector:
-                        true_id = t["true_id"]
-                        local_id = true_id + r_id * 1000
-
-                        # CHỈNH SỬA: Quy đổi nhiễu sigma_dist_m từ mét sang kilômét trước khi cộng
-                        noise_dist_km = random.gauss(0, sigma_dist_m) / 1000.0
-                        noisy_dist = max(0.0, detection["distance_km"] + noise_dist_km)
-
-                        noisy_bearing = (
-                            true_bearing + random.gauss(0, sigma_bearing_deg)
-                        ) % 360.0
-
-                        noisy_speed = max(
-                            0.0, t["speed_knots"] + random.gauss(0, sigma_speed_knots)
-                        )
-
-                        noisy_course = (
-                            t["course"] + random.gauss(0, sigma_course_deg)
-                        ) % 360.0
-
-                        radar_pos = (radar["lat"], radar["lon"])
-                        noisy_pos = distance(kilometers=noisy_dist).destination(
-                            radar_pos, noisy_bearing
-                        )
-
-                        detected_records.append(
-                            [
-                                timestamp_str,
-                                r_id,
-                                local_id,
-                                true_id,
-                                round(noisy_dist, 3),
-                                round(noisy_bearing, 2),
-                                round(noisy_speed, 2),
-                                round(noisy_course, 2),
-                                round(noisy_pos.latitude, 6),
-                                round(noisy_pos.longitude, 6),
-                            ]
-                        )
-
-        # Cập nhật vị trí mục tiêu cho giây tiếp theo
-        if step < duration:
-            update_target_positions(targets, dt=1)
-
-    # Xuất file dữ liệu
+    # Mở file ghi luồng trực tiếp theo từng giây
     with open(output_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(csv_headers)
-        writer.writerows(detected_records)
 
-    print(
-        f"Mô phỏng hoàn tất! Dữ liệu di chuyển thực tế đã được lưu tại: {output_file}"
-    )
+        for step in range(duration + 1):
+            current_sim_time = start_time + timedelta(seconds=step)
+            timestamp_str = current_sim_time.strftime("%Y-%m-%d %H:%M:%S")
+
+            step_records = []
+
+            for radar in radars:
+                r_id = int(radar["id"])
+                scan_period = radar["scan_period_s"]
+
+                current_position_in_cycle = step % scan_period
+                min_angle = (current_position_in_cycle / scan_period) * 360.0
+                max_angle = ((current_position_in_cycle + 1) / scan_period) * 360.0
+                normalized_max = max_angle % 360.0
+
+                for t in targets:
+                    detection = calculate_radar_detection(radar, t)
+                    if detection:
+                        true_bearing = detection["bearing_deg"]
+
+                        if min_angle < max_angle and max_angle <= 360.0:
+                            is_in_scan_sector = min_angle <= true_bearing < max_angle
+                        else:
+                            is_in_scan_sector = (
+                                true_bearing >= min_angle
+                                or true_bearing < normalized_max
+                            )
+
+                        if is_in_scan_sector:
+                            true_id = t["true_id"]
+                            local_id = true_id + r_id * 1000
+
+                            # SỬ DỤNG HẰNG SỐ CHỮ HOA TOÀN CỤC Ở ĐÂY
+                            noise_dist_km = random.gauss(0, SIGMA_DIST_M) / 1000.0
+                            noisy_dist = max(
+                                0.0, detection["distance_km"] + noise_dist_km
+                            )
+
+                            noisy_bearing = (
+                                true_bearing + random.gauss(0, SIGMA_BEARING_DEG)
+                            ) % 360.0
+                            noisy_speed = max(
+                                0.0,
+                                t["speed_knots"] + random.gauss(0, SIGMA_SPEED_KNOTS),
+                            )
+                            noisy_course = (
+                                t["course"] + random.gauss(0, SIGMA_COURSE_DEG)
+                            ) % 360.0
+
+                            radar_pos = (radar["lat"], radar["lon"])
+                            noisy_pos = distance(kilometers=noisy_dist).destination(
+                                radar_pos, noisy_bearing
+                            )
+
+                            step_records.append(
+                                [
+                                    timestamp_str,
+                                    r_id,
+                                    local_id,
+                                    true_id,
+                                    round(noisy_dist, 3),
+                                    round(noisy_bearing, 2),
+                                    round(noisy_speed, 2),
+                                    round(noisy_course, 2),
+                                    round(noisy_pos.latitude, 6),
+                                    round(noisy_pos.longitude, 6),
+                                ]
+                            )
+
+            if step_records:
+                writer.writerows(step_records)
+
+            if step < duration:
+                update_target_positions(targets, dt=1)
+
+    print(f"Mô phỏng hoàn tất! Dữ liệu đã được lưu tại: {output_file}")
 
 
 if __name__ == "__main__":
