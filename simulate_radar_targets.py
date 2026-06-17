@@ -1,376 +1,520 @@
 import csv
-import json
 import math
 import os
 import random
-import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Tuple
+from enum import Enum
 
 from geopy.distance import distance
+from pydantic import BaseModel, Field, field_validator
 
-MIN_TARGETS = 6
-MAX_TARGETS = 999
-
-MAX_ERROR_DIST_M = 15.0
-MAX_ERROR_BEARING_DEG = 0.7
-MAX_ERROR_SPEED_KNOTS = 3.0
-MAX_ERROR_COURSE_DEG = 10.0
-
-SIGMA_DIST_M = MAX_ERROR_DIST_M / 3.0
-SIGMA_BEARING_DEG = MAX_ERROR_BEARING_DEG / 3.0
-SIGMA_SPEED_KNOTS = MAX_ERROR_SPEED_KNOTS / 3.0
-SIGMA_COURSE_DEG = MAX_ERROR_COURSE_DEG / 3.0
-
-MIN_RESOLUTION_DIST_M = 100.0
-MIN_RESOLUTION_DIST_KM = MIN_RESOLUTION_DIST_M / 1000.0
-MIN_RESOLUTION_BEARING_DEG = 3.0
-MIN_RESOLUTION_SPEED_KNOTS = MAX_ERROR_SPEED_KNOTS
-MIN_RESOLUTION_COURSE_DEG = MAX_ERROR_COURSE_DEG
 
 KNOTS_TO_MPS = 0.514444
+KM_TO_M = 1000.0
+MIN_ANGLE_DEG = 0.0
+MAX_ANGLE_DEG = 360.0
+
+# Radar parameters
+MAX_RADARS = 10
+
+ROUND_DIST_KM_DIGITS = 3
+ROUND_BEARING_DEG_DIGITS = 2
+ROUND_SPEED_KNOTS_DIGITS = 2
+ROUND_COURSE_DEG_DIGITS = 2
+ROUND_LAT_LON_DIGITS = 6
+
+MAX_RADAR_DIST_M = 15.0
+MAX_RADAR_BEARING_DEG = 0.7
+MAX_RADAR_SPEED_KNOTS = 3.0
+MAX_RADAR_COURSE_DEG = 10.0
+
+SIGMA_RADAR_DIST_M = MAX_RADAR_DIST_M / 3.0
+SIGMA_RADAR_DIST_KM = SIGMA_RADAR_DIST_M / KM_TO_M
+SIGMA_RADAR_BEARING_DEG = MAX_RADAR_BEARING_DEG / 3.0
+SIGMA_RADAR_SPEED_KNOTS = MAX_RADAR_SPEED_KNOTS / 3.0
+SIGMA_RADAR_COURSE_DEG = MAX_RADAR_COURSE_DEG / 3.0
+
+MIN_RADAR_RESOLUTION_DIST_M = 100.0
+MIN_RADAR_RESOLUTION_DIST_KM = MIN_RADAR_RESOLUTION_DIST_M / 1000.0
+MIN_RADAR_RESOLUTION_BEARING_DEG = 3.0
+MIN_RADAR_RESOLUTION_SPEED_KNOTS = MAX_RADAR_SPEED_KNOTS
+MIN_RADAR_RESOLUTION_COURSE_DEG = MAX_RADAR_COURSE_DEG
+
+# Target parameters
+MAX_TARGETS = 999
+MAX_SPEED_KNOTS = 30.0
 
 
-def load_input_config(file_path: str = "input.json") -> Dict[str, Any]:
-    if not os.path.exists(file_path):
-        print(f"ERROR: Configuration file '{file_path}' not found.")
-        sys.exit(1)
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+class CloseTargetPairType(Enum):
+    SAME_SPEED_SAME_COURSE = 1
+    DIFF_SPEED_SAME_COURSE = 2
+    SAME_SPEED_DIFF_COURSE = 3
 
 
-def generate_initial_targets(num_targets: int, radars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    targets = []
-    current_id = 1
-    MIN_PAIR_RATIO = 0.5
+# Close target pair config
+MIN_CLOSE_TARGET_PAIRS_PER_TYPE = 1
+MIN_CLOSE_TARGET_PAIRS = len(CloseTargetPairType) * MIN_CLOSE_TARGET_PAIRS_PER_TYPE
+MIN_TARGETS = 2 * MIN_CLOSE_TARGET_PAIRS
+MIN_CLOSE_PAIR_RATIO = 0.5
 
-    if not (MIN_TARGETS <= num_targets <= MAX_TARGETS):
-        raise ValueError(
-            f"[VALIDATION ERROR] num_targets is {num_targets}. "
-            f"Must be within range [{MIN_TARGETS} -> {MAX_TARGETS}]."
-        )
+# Smooth random walk config
+MAX_WALK_COURSE_DELTA_DEG = 2.0
+MAX_WALK_SPEED_DELTA_KNOTS = 0.2
+DEFAULT_MOVEMENT_DT_S = 1.0
 
-    # Ensure special targets leave room for at least some standard targets if possible
-    max_allowed_pairs = (num_targets - 1) // 2 if num_targets % 2 != 0 else (num_targets // 2) - 1
-    max_allowed_pairs = max(3, max_allowed_pairs)
+# Target config
+MIN_GENERATED_DISTANCE_M = 1.0
+MIN_SPEED_KNOTS = 5.0
 
-    min_special_targets = math.ceil(num_targets * MIN_PAIR_RATIO)
-    if min_special_targets % 2 != 0:
-        min_special_targets += 1
 
-    total_needed_pairs = min(max_allowed_pairs, max(3, min_special_targets // 2))
+class RadarConfig(BaseModel):
+    id: int = Field(gt=0)
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    range_km: float = Field(gt=MIN_GENERATED_DISTANCE_M / KM_TO_M)
+    scan_period_s: int = Field(gt=0)
 
-    # Base allocation (guarantee at least 1 pair per edge-case type)
-    num_pairs_type1 = 1
-    num_pairs_type2 = 1
-    num_pairs_type3 = 1
 
-    # Dynamically distribute the remaining special pairs
-    for _ in range(total_needed_pairs - 3):
-        chosen_type = random.choice([1, 2, 3])
-        if chosen_type == 1:
-            num_pairs_type1 += 1
-        elif chosen_type == 2:
-            num_pairs_type2 += 1
-        else:
-            num_pairs_type3 += 1
+class Config(BaseModel):
+    num_targets: int = Field(ge=MIN_TARGETS, le=MAX_TARGETS)
+    simulation_duration_s: int = Field(gt=0)
+    radars: list[RadarConfig] = Field(min_length=1, max_length=MAX_RADARS)
 
-    # Print initialization summary
-    print("--- Target Generation Summary ---")
-    print(f"Total Targets Requested: {num_targets}")
-    print(f"Type 1 Pairs (Overlapping): {num_pairs_type1}")
-    print(f"Type 2 Pairs (Diff Speed) : {num_pairs_type2}")
-    print(f"Type 3 Pairs (Diff Course): {num_pairs_type3}")
-    print(
-        f"Total Edge-Case Targets  : {(num_pairs_type1 + num_pairs_type2 + num_pairs_type3) * 2}"
+    @field_validator("radars")
+    @classmethod
+    def validate_radars(cls, radars: list[RadarConfig]) -> list[RadarConfig]:
+        radar_ids = set()
+
+        for radar in radars:
+            if radar.id in radar_ids:
+                raise ValueError(f"Duplicate radar id: {radar.id}")
+
+            radar_ids.add(radar.id)
+
+        return radars
+
+
+@dataclass
+class Radar:
+    id: int
+    lat: float
+    lon: float
+    range_km: float
+    scan_period_s: int
+
+
+@dataclass
+class Target:
+    id: int
+    lat: float
+    lon: float
+    speed_knots: float
+    course_deg: float
+
+
+@dataclass
+class NumCloseTargetPairs:
+    same_speed_same_course: int = MIN_CLOSE_TARGET_PAIRS_PER_TYPE
+    diff_speed_same_course: int = MIN_CLOSE_TARGET_PAIRS_PER_TYPE
+    same_speed_diff_course: int = MIN_CLOSE_TARGET_PAIRS_PER_TYPE
+
+
+@dataclass
+class RadarDetection:
+    distance_km: float
+    bearing_deg: float
+
+
+@dataclass
+class DetectedTarget:
+    target: Target
+    detection: RadarDetection
+
+
+@dataclass
+class RadarRecord:
+    timestamp: str
+    radar_id: int
+    local_target_id: int
+    true_target_id: int
+    dist_km: float
+    bearing_deg: float
+    speed_knots: float
+    course_deg: float
+    lat: float
+    lon: float
+
+
+def calculate_num_close_target_pairs(
+    num_targets: int,
+) -> NumCloseTargetPairs:
+    max_close_target_pairs = num_targets // 2
+
+    min_targets_in_close_pairs = math.ceil(num_targets * MIN_CLOSE_PAIR_RATIO)
+    if min_targets_in_close_pairs % 2 != 0:
+        min_targets_in_close_pairs += 1
+
+    required_close_pair_count = min(
+        max_close_target_pairs,
+        max(
+            MIN_CLOSE_TARGET_PAIRS,
+            min_targets_in_close_pairs // 2,
+        ),
     )
-    print("---------------------------------")
 
-    def get_random_position_in_radar_range() -> Tuple[float, float]:
-        selected_radar = random.choice(radars)
-        radar_origin = (selected_radar["lat"], selected_radar["lon"])
-        rand_dist_km = math.sqrt(random.uniform(0.05, 0.8)) * selected_radar["range_km"]
-        rand_bearing = random.uniform(0.0, 360.0)
-        pos = distance(kilometers=rand_dist_km).destination(radar_origin, rand_bearing)
-        return pos.latitude, pos.longitude
+    num_close_target_pairs = NumCloseTargetPairs()
+    close_pair_types = list(CloseTargetPairType)
+    for _ in range(required_close_pair_count - MIN_CLOSE_TARGET_PAIRS):
+        selected_pair_type = random.choice(close_pair_types)
+        match selected_pair_type:
+            case CloseTargetPairType.SAME_SPEED_SAME_COURSE:
+                num_close_target_pairs.same_speed_same_course += 1
+            case CloseTargetPairType.DIFF_SPEED_SAME_COURSE:
+                num_close_target_pairs.diff_speed_same_course += 1
+            case CloseTargetPairType.SAME_SPEED_DIFF_COURSE:
+                num_close_target_pairs.same_speed_diff_course += 1
 
-    # Type 1: Overlapping pairs (merged by radar resolution)
-    for _ in range(num_pairs_type1):
-        base_lat, base_lon = get_random_position_in_radar_range()
-        base_speed = random.uniform(10.0, 25.0)
-        base_course = random.uniform(0.0, 360.0)
+    return num_close_target_pairs
 
+
+def get_random_position_in_radar_range(
+    radars: list[Radar],
+) -> tuple[float, float]:
+    selected_radar = random.choice(radars)
+
+    rand_dist_km = random.uniform(
+        MIN_GENERATED_DISTANCE_M / KM_TO_M, selected_radar.range_km
+    )
+
+    rand_bearing = random.uniform(MIN_ANGLE_DEG, MAX_ANGLE_DEG)
+
+    pos = distance(kilometers=rand_dist_km).destination(
+        (selected_radar.lat, selected_radar.lon), rand_bearing
+    )
+
+    return pos.latitude, pos.longitude
+
+
+def append_close_target_pair(
+    targets: list[Target],
+    current_target_id: int,
+    base_lat: float,
+    base_lon: float,
+    first_target_speed_knots: float,
+    second_target_speed_knots: float,
+    first_target_course_deg: float,
+    second_target_course_deg: float,
+) -> int:
+    targets.append(
+        Target(
+            current_target_id,
+            base_lat,
+            base_lon,
+            first_target_speed_knots,
+            first_target_course_deg,
+        )
+    )
+    current_target_id += 1
+
+    second_target_position = distance(
+        meters=random.uniform(MIN_GENERATED_DISTANCE_M, MIN_RADAR_RESOLUTION_DIST_M)
+    ).destination(
+        (base_lat, base_lon), bearing=random.uniform(MIN_ANGLE_DEG, MAX_ANGLE_DEG)
+    )
+    targets.append(
+        Target(
+            current_target_id,
+            second_target_position.latitude,
+            second_target_position.longitude,
+            second_target_speed_knots,
+            second_target_course_deg,
+        )
+    )
+    current_target_id += 1
+
+    return current_target_id
+
+
+def generate_targets(num_targets: int, radars: list[Radar]) -> list[Target]:
+    print(f"[INFO] Number of targets: {num_targets}")
+
+    num_close_target_pairs = calculate_num_close_target_pairs(num_targets)
+
+    print(
+        f"[INFO] Number of close same speed same course pairs: {num_close_target_pairs.same_speed_same_course}"
+    )
+    print(
+        f"[INFO] Number of close diff speed same course pairs: {num_close_target_pairs.diff_speed_same_course}"
+    )
+    print(
+        f"[INFO] Number of close same speed diff course pairs: {num_close_target_pairs.same_speed_diff_course}"
+    )
+
+    targets: list[Target] = []
+    current_target_id = 1
+
+    for _ in range(num_close_target_pairs.same_speed_same_course):
+        base_lat, base_lon = get_random_position_in_radar_range(radars)
+        base_speed_knots = random.uniform(MIN_SPEED_KNOTS, MAX_SPEED_KNOTS)
+        base_course_deg = random.uniform(MIN_ANGLE_DEG, MAX_ANGLE_DEG)
+        current_target_id = append_close_target_pair(
+            targets,
+            current_target_id,
+            base_lat,
+            base_lon,
+            base_speed_knots,
+            base_speed_knots,
+            base_course_deg,
+            base_course_deg,
+        )
+
+    for _ in range(num_close_target_pairs.diff_speed_same_course):
+        base_lat, base_lon = get_random_position_in_radar_range(radars)
+        base_course_deg = random.uniform(MIN_ANGLE_DEG, MAX_ANGLE_DEG)
+        first_target_speed_knots = random.uniform(
+            MIN_SPEED_KNOTS, MAX_SPEED_KNOTS - MIN_RADAR_RESOLUTION_SPEED_KNOTS
+        )
+        second_target_speed_knots = random.uniform(
+            first_target_speed_knots + MIN_RADAR_RESOLUTION_SPEED_KNOTS, MAX_SPEED_KNOTS
+        )
+        current_target_id = append_close_target_pair(
+            targets,
+            current_target_id,
+            base_lat,
+            base_lon,
+            first_target_speed_knots,
+            second_target_speed_knots,
+            base_course_deg,
+            base_course_deg,
+        )
+
+    for _ in range(num_close_target_pairs.same_speed_diff_course):
+        base_lat, base_lon = get_random_position_in_radar_range(radars)
+        base_speed_knots = random.uniform(MIN_SPEED_KNOTS, MAX_SPEED_KNOTS)
+        first_target_course_deg = random.uniform(MIN_ANGLE_DEG, MAX_ANGLE_DEG)
+        second_target_course_deg = (
+            first_target_course_deg
+            + random.uniform(MIN_RADAR_RESOLUTION_COURSE_DEG, MAX_ANGLE_DEG / 2.0)
+        ) % MAX_ANGLE_DEG
+        current_target_id = append_close_target_pair(
+            targets,
+            current_target_id,
+            base_lat,
+            base_lon,
+            base_speed_knots,
+            base_speed_knots,
+            first_target_course_deg,
+            second_target_course_deg,
+        )
+
+    for i in range(current_target_id, num_targets + 1):
+        rand_lat, rand_lon = get_random_position_in_radar_range(radars)
+        speed_knots = random.uniform(MIN_SPEED_KNOTS, MAX_SPEED_KNOTS)
+        course_deg = random.uniform(MIN_ANGLE_DEG, MAX_ANGLE_DEG)
         targets.append(
-            {
-                "true_id": current_id,
-                "lat": base_lat,
-                "lon": base_lon,
-                "speed_knots": base_speed,
-                "speed_mps": base_speed * KNOTS_TO_MPS,
-                "course": base_course,
-            }
-        )
-        current_id += 1
-
-        pos_b = distance(meters=random.uniform(10, 50)).destination(
-            (base_lat, base_lon), random.uniform(0, 360)
-        )
-        targets.append(
-            {
-                "true_id": current_id,
-                "lat": pos_b.latitude,
-                "lon": pos_b.longitude,
-                "speed_knots": base_speed,
-                "speed_mps": base_speed * KNOTS_TO_MPS,
-                "course": base_course,
-            }
-        )
-        current_id += 1
-
-    # Type 2: Adjacent pairs distinguishable by speed
-    for _ in range(num_pairs_type2):
-        base_lat, base_lon = get_random_position_in_radar_range()
-        base_course = random.uniform(0.0, 360.0)
-        speed_a = random.uniform(5.0, 15.0)
-        speed_b = speed_a + random.uniform(4.0, 8.0)
-
-        targets.append(
-            {
-                "true_id": current_id,
-                "lat": base_lat,
-                "lon": base_lon,
-                "speed_knots": speed_a,
-                "speed_mps": speed_a * KNOTS_TO_MPS,
-                "course": base_course,
-            }
-        )
-        current_id += 1
-
-        pos_b = distance(meters=random.uniform(10, 50)).destination(
-            (base_lat, base_lon), random.uniform(0, 360)
-        )
-        targets.append(
-            {
-                "true_id": current_id,
-                "lat": pos_b.latitude,
-                "lon": pos_b.longitude,
-                "speed_knots": speed_b,
-                "speed_mps": speed_b * KNOTS_TO_MPS,
-                "course": base_course,
-            }
-        )
-        current_id += 1
-
-    # Type 3: Adjacent pairs distinguishable by course
-    for _ in range(num_pairs_type3):
-        base_lat, base_lon = get_random_position_in_radar_range()
-        base_speed = random.uniform(10.0, 25.0)
-        course_a = random.uniform(0.0, 360.0)
-        course_b = (course_a + random.uniform(15.0, 30.0)) % 360.0
-
-        targets.append(
-            {
-                "true_id": current_id,
-                "lat": base_lat,
-                "lon": base_lon,
-                "speed_knots": base_speed,
-                "speed_mps": base_speed * KNOTS_TO_MPS,
-                "course": course_a,
-            }
-        )
-        current_id += 1
-
-        pos_b = distance(meters=random.uniform(10, 50)).destination(
-            (base_lat, base_lon), random.uniform(0, 360)
-        )
-        targets.append(
-            {
-                "true_id": current_id,
-                "lat": pos_b.latitude,
-                "lon": pos_b.longitude,
-                "speed_knots": base_speed,
-                "speed_mps": base_speed * KNOTS_TO_MPS,
-                "course": course_b,
-            }
-        )
-        current_id += 1
-
-    # Standard targets generation
-    for i in range(current_id, num_targets + 1):
-        rand_lat, rand_lon = get_random_position_in_radar_range()
-        speed_knots = random.uniform(5.0, 28.0)
-
-        targets.append(
-            {
-                "true_id": i,
-                "lat": rand_lat,
-                "lon": rand_lon,
-                "speed_knots": speed_knots,
-                "speed_mps": speed_knots * KNOTS_TO_MPS,
-                "course": random.uniform(0.0, 360.0),
-            }
+            Target(
+                i,
+                rand_lat,
+                rand_lon,
+                speed_knots,
+                course_deg,
+            )
         )
 
     return targets
 
 
-def update_target_positions(targets: List[Dict[str, Any]], dt: float):
-    """Updates target positions using smooth random walk."""
-    for t in targets:
-        t["course"] = (t["course"] + random.uniform(-2.0, 2.0)) % 360.0
-        new_speed_knots = max(
-            5.0, min(30.0, t["speed_knots"] + random.uniform(-0.2, 0.2))
-        )
-        t["speed_knots"] = new_speed_knots
-        t["speed_mps"] = new_speed_knots * KNOTS_TO_MPS
+def update_target_positions(targets: list[Target], dt_s: float):
+    for target in targets:
+        target.course_deg = (
+            target.course_deg
+            + random.uniform(-MAX_WALK_COURSE_DELTA_DEG, MAX_WALK_COURSE_DELTA_DEG)
+        ) % MAX_ANGLE_DEG
 
-        dist_moved_km = (t["speed_mps"] * dt) / 1000.0
+        target.speed_knots = max(
+            MIN_SPEED_KNOTS,
+            min(
+                MAX_SPEED_KNOTS,
+                target.speed_knots
+                + random.uniform(
+                    -MAX_WALK_SPEED_DELTA_KNOTS, MAX_WALK_SPEED_DELTA_KNOTS
+                ),
+            ),
+        )
+
+        new_speed_mps = target.speed_knots * KNOTS_TO_MPS
+        dist_moved_km = (new_speed_mps * dt_s) / KM_TO_M
         next_pos = distance(kilometers=dist_moved_km).destination(
-            (t["lat"], t["lon"]), t["course"]
+            (target.lat, target.lon), target.course_deg
         )
-        t["lat"], t["lon"] = next_pos.latitude, next_pos.longitude
+        target.lat, target.lon = next_pos.latitude, next_pos.longitude
 
 
-def get_radar_detection(
-    radar: Dict[str, Any],
-    target: Dict[str, Any],
-    radar_lat_rad: float,
-    radar_lon_rad: float,
-) -> Any:
-    radar_pos = (radar["lat"], radar["lon"])
-    target_pos = (target["lat"], target["lon"])
+def get_radar_detection(radar: Radar, target: Target) -> RadarDetection | None:
+    radar_pos = (radar.lat, radar.lon)
+    target_pos = (target.lat, target.lon)
     dist_km = distance(radar_pos, target_pos).kilometers
 
-    if dist_km <= radar["range_km"]:
-        lat2, lon2 = math.radians(target["lat"]), math.radians(target["lon"])
+    if dist_km <= radar.range_km:
+        radar_lat_rad, radar_lon_rad = math.radians(radar.lat), math.radians(radar.lon)
+        target_lat_rad, target_lon_rad = (
+            math.radians(target.lat),
+            math.radians(target.lon),
+        )
 
-        y = math.sin(lon2 - radar_lon_rad) * math.cos(lat2)
-        x = math.cos(radar_lat_rad) * math.sin(lat2) - math.sin(
+        y = math.sin(target_lon_rad - radar_lon_rad) * math.cos(target_lat_rad)
+        x = math.cos(radar_lat_rad) * math.sin(target_lat_rad) - math.sin(
             radar_lat_rad
-        ) * math.cos(lat2) * math.cos(lon2 - radar_lon_rad)
-        bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
+        ) * math.cos(target_lat_rad) * math.cos(target_lon_rad - radar_lon_rad)
+        bearing_deg = (math.degrees(math.atan2(y, x)) + MAX_ANGLE_DEG) % MAX_ANGLE_DEG
 
-        return {"distance_km": dist_km, "bearing_deg": bearing}
+        return RadarDetection(distance_km=dist_km, bearing_deg=bearing_deg)
+
     return None
 
 
-def calculate_radar_record(
-    radar: Dict[str, Any],
-    target: Dict[str, Any],
-    detection: Dict[str, Any],
-    min_angle: float,
-    max_angle: float,
-    normalized_max: float,
-    timestamp_str: str,
-) -> Any:
-    true_bearing = detection["bearing_deg"]
-
-    if min_angle < max_angle and max_angle <= 360.0:
-        is_in_scan_sector = min_angle <= true_bearing < max_angle
-    else:
-        is_in_scan_sector = true_bearing >= min_angle or true_bearing < normalized_max
-
-    if not is_in_scan_sector:
-        return None
-
-    r_id = int(radar["id"])
-    true_id = target["true_id"]
-    local_id = true_id + r_id * (MAX_TARGETS + 1)
-
-    # Inject Gaussian noise
-    noisy_dist = max(
-        0.0, detection["distance_km"] + (random.gauss(0, SIGMA_DIST_M) / 1000.0)
-    )
-    noisy_bearing = (true_bearing + random.gauss(0, SIGMA_BEARING_DEG)) % 360.0
-    noisy_speed = max(0.0, target["speed_knots"] + random.gauss(0, SIGMA_SPEED_KNOTS))
-    noisy_course = (target["course"] + random.gauss(0, SIGMA_COURSE_DEG)) % 360.0
-
-    noisy_pos = distance(kilometers=noisy_dist).destination(
-        (radar["lat"], radar["lon"]), noisy_bearing
-    )
-
-    return [
-        timestamp_str,
-        r_id,
-        local_id,
-        true_id,
-        round(noisy_dist, 3),
-        round(noisy_bearing, 2),
-        round(noisy_speed, 2),
-        round(noisy_course, 2),
-        round(noisy_pos.latitude, 6),
-        round(noisy_pos.longitude, 6),
-    ]
-
-
-def filter_radar_resolution(
-    detected_targets: List[Tuple[List, Dict, Dict]],
-) -> List[List]:
-    """Filters and merges detections based on radar resolution limits (Early Exit optimization)."""
+def apply_radar_resolution_filter(
+    detected_targets: list[DetectedTarget],
+) -> list[DetectedTarget]:
     if not detected_targets:
         return []
 
-    detected_targets.sort(key=lambda x: x[1]["distance_km"])
-    filtered_records: List[Tuple[List, Dict, Dict]] = []
+    sorted_detected_targets = sorted(
+        detected_targets,
+        key=lambda detected_target: detected_target.detection.distance_km,
+    )
+    filtered_detected_targets: list[DetectedTarget] = []
 
-    for current in detected_targets:
-        # Replaced unused 'current_record' with '_' to silence Pylance warnings
-        _, current_det, current_target_obj = current
+    for current_detected_target in sorted_detected_targets:
+        current_detection = current_detected_target.detection
+        current_target = current_detected_target.target
+
         should_keep = True
 
-        current_dist = current_det["distance_km"]
-        current_bearing = current_det["bearing_deg"]
-        current_speed = current_target_obj["speed_knots"]
-        current_course = current_target_obj["course"]
+        for approved_detected_target in reversed(filtered_detected_targets):
+            approved_detection = approved_detected_target.detection
+            approved_target = approved_detected_target.target
 
-        for approved in reversed(filtered_records):
-            _, app_det, app_target_obj = approved
-            app_dist = app_det["distance_km"]
+            if (
+                current_detection.distance_km - approved_detection.distance_km
+            ) > MIN_RADAR_RESOLUTION_DIST_KM:
+                continue
 
-            if (current_dist - app_dist) > MIN_RESOLUTION_DIST_KM:
-                break
+            delta_bearing = abs(
+                current_detection.bearing_deg - approved_detection.bearing_deg
+            )
 
-            delta_bearing = abs(current_bearing - app_det["bearing_deg"])
-            if delta_bearing > 180.0:
-                delta_bearing = 360.0 - delta_bearing
-            if delta_bearing >= MIN_RESOLUTION_BEARING_DEG:
+            if delta_bearing > MAX_ANGLE_DEG / 2.0:
+                delta_bearing = MAX_ANGLE_DEG - delta_bearing
+
+            if delta_bearing >= MIN_RADAR_RESOLUTION_BEARING_DEG:
                 continue
 
             if (
-                abs(current_speed - app_target_obj["speed_knots"])
-                >= MIN_RESOLUTION_SPEED_KNOTS
+                abs(current_target.speed_knots - approved_target.speed_knots)
+                >= MIN_RADAR_RESOLUTION_SPEED_KNOTS
             ):
                 continue
 
-            delta_course = abs(current_course - app_target_obj["course"])
-            if delta_course > 180.0:
-                delta_course = 360.0 - delta_course
-            if delta_course >= MIN_RESOLUTION_COURSE_DEG:
+            delta_course = abs(current_target.course_deg - approved_target.course_deg)
+
+            if delta_course > MAX_ANGLE_DEG / 2.0:
+                delta_course = MAX_ANGLE_DEG - delta_course
+
+            if delta_course >= MIN_RADAR_RESOLUTION_COURSE_DEG:
                 continue
 
-            # Target overlaps completely; merge required
             should_keep = False
             break
 
         if should_keep:
-            filtered_records.append(current)
+            filtered_detected_targets.append(current_detected_target)
 
-    return [item[0] for item in filtered_records]
+    return filtered_detected_targets
+
+
+def calculate_radar_record(
+    radar: Radar,
+    target: Target,
+    detection: RadarDetection,
+    min_angle: float,
+    max_angle: float,
+    timestamp: str,
+) -> RadarRecord | None:
+    true_bearing_deg = detection.bearing_deg
+
+    if min_angle < max_angle:
+        is_in_scan_sector = min_angle <= true_bearing_deg < max_angle
+    else:
+        is_in_scan_sector = (
+            true_bearing_deg >= min_angle or true_bearing_deg < max_angle
+        )
+
+    if not is_in_scan_sector:
+        return None
+
+    radar_id = radar.id
+    true_target_id = target.id
+    local_target_id = true_target_id + radar_id * (MAX_TARGETS + 1)
+
+    noisy_dist_km = max(
+        0.0, detection.distance_km + random.gauss(0, SIGMA_RADAR_DIST_KM)
+    )
+    noisy_bearing_deg = (
+        true_bearing_deg + random.gauss(0, SIGMA_RADAR_BEARING_DEG)
+    ) % MAX_ANGLE_DEG
+    noisy_speed_knots = max(
+        0.0, target.speed_knots + random.gauss(0, SIGMA_RADAR_SPEED_KNOTS)
+    )
+    noisy_course_deg = (
+        target.course_deg + random.gauss(0, SIGMA_RADAR_COURSE_DEG)
+    ) % MAX_ANGLE_DEG
+
+    noisy_pos = distance(kilometers=noisy_dist_km).destination(
+        (radar.lat, radar.lon), noisy_bearing_deg
+    )
+
+    return RadarRecord(
+        timestamp=timestamp,
+        radar_id=radar_id,
+        local_target_id=local_target_id,
+        true_target_id=true_target_id,
+        dist_km=round(noisy_dist_km, ROUND_DIST_KM_DIGITS),
+        bearing_deg=round(noisy_bearing_deg, ROUND_BEARING_DEG_DIGITS),
+        speed_knots=round(noisy_speed_knots, ROUND_SPEED_KNOTS_DIGITS),
+        course_deg=round(noisy_course_deg, ROUND_COURSE_DEG_DIGITS),
+        lat=round(noisy_pos.latitude, ROUND_LAT_LON_DIGITS),
+        lon=round(noisy_pos.longitude, ROUND_LAT_LON_DIGITS),
+    )
 
 
 def main():
-    config = load_input_config()
-    radars = config["radars"]
-    num_targets = config["num_targets"]
-    duration = config.get("simulation_duration_s", 60)
+    with open("input.json", encoding="utf-8") as f:
+        config = Config.model_validate_json(f.read())
+
+    radars = [
+        Radar(
+            id=radar.id,
+            lat=radar.lat,
+            lon=radar.lon,
+            range_km=radar.range_km,
+            scan_period_s=radar.scan_period_s,
+        )
+        for radar in config.radars
+    ]
+    num_targets = config.num_targets
+    duration_s = config.simulation_duration_s
 
     start_time = datetime.now()
+    start_time_s = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[INFO] Start simulation time: {start_time_s}")
+
     output_dir = os.path.join("outputs", start_time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "radar_target_data.csv")
 
-    targets = generate_initial_targets(num_targets, radars)
+    targets = generate_targets(num_targets, radars)
     csv_headers = [
         "timestamp",
         "radar_id",
@@ -388,50 +532,67 @@ def main():
         writer = csv.writer(f)
         writer.writerow(csv_headers)
 
-        for step in range(duration + 1):
-            current_sim_time = start_time + timedelta(seconds=step)
-            timestamp_str = current_sim_time.strftime("%Y-%m-%d %H:%M:%S")
+        for step in range(1, duration_s + 1):
+            current_time = start_time + timedelta(seconds=step)
+            timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
             step_records = []
 
             for radar in radars:
-                scan_period = radar["scan_period_s"]
-                current_position_in_cycle = step % scan_period
-                min_angle = (current_position_in_cycle / scan_period) * 360.0
-                max_angle = ((current_position_in_cycle + 1) / scan_period) * 360.0
-                normalized_max = max_angle % 360.0
+                scan_period_s = radar.scan_period_s
+                previous_position_in_cycle = (step - 1) % scan_period_s
+                current_position_in_cycle = step % scan_period_s
 
-                radar_lat_rad = math.radians(radar["lat"])
-                radar_lon_rad = math.radians(radar["lon"])
+                min_angle = (previous_position_in_cycle / scan_period_s) * MAX_ANGLE_DEG
+                max_angle = (current_position_in_cycle / scan_period_s) * MAX_ANGLE_DEG
 
-                radar_detected_pool = []
+                detected_targets: list[DetectedTarget] = []
 
                 for target in targets:
-                    detection = get_radar_detection(
-                        radar, target, radar_lat_rad, radar_lon_rad
-                    )
-                    if detection:
-                        record = calculate_radar_record(
-                            radar,
-                            target,
-                            detection,
-                            min_angle,
-                            max_angle,
-                            normalized_max,
-                            timestamp_str,
+                    radar_detection = get_radar_detection(radar, target)
+                    if radar_detection:
+                        detected_targets.append(
+                            DetectedTarget(
+                                detection=radar_detection,
+                                target=target,
+                            )
                         )
-                        if record:
-                            radar_detected_pool.append((record, detection, target))
 
-                final_radar_records = filter_radar_resolution(radar_detected_pool)
-                step_records.extend(final_radar_records)
+                filtered_detected_targets = apply_radar_resolution_filter(
+                    detected_targets
+                )
+                for detected_target in filtered_detected_targets:
+                    radar_record = calculate_radar_record(
+                        radar,
+                        detected_target.target,
+                        detected_target.detection,
+                        min_angle,
+                        max_angle,
+                        timestamp,
+                    )
+
+                    if radar_record:
+                        step_records.append(
+                            [
+                                radar_record.timestamp,
+                                radar_record.radar_id,
+                                radar_record.local_target_id,
+                                radar_record.true_target_id,
+                                radar_record.dist_km,
+                                radar_record.bearing_deg,
+                                radar_record.speed_knots,
+                                radar_record.course_deg,
+                                radar_record.lat,
+                                radar_record.lon,
+                            ]
+                        )
 
             if step_records:
                 writer.writerows(step_records)
 
-            if step < duration:
-                update_target_positions(targets, dt=1.0)
+            if step < duration_s:
+                update_target_positions(targets, DEFAULT_MOVEMENT_DT_S)
 
-    print(f"Simulation completed successfully! Data saved to: {output_file}")
+    print(f"[INFO] Simulation output saved to {output_file}")
 
 
 if __name__ == "__main__":
