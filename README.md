@@ -1,45 +1,23 @@
-# Radar Target Simulation and Visualization Tool
+# Radar Target Simulation Tool
 
-This repository provides tools to simulate radar targets and visualize radar coverage maps.
-
-## Simulate radar targets
-
-### Input file
+## Input file
 
 `input.json`
 
-### Output file
+## Output file
 
 `outputs/<YYYYMMDD_hhmmss>/radar_target_data.csv`
 
-### Installation
+## Installation
 
 ```bash
-pip install geopy
+pip install pydantic geopy
 ```
 
-### Usage
+## Usage
 
 ```bash
 python3 simulate_radar_targets.py
-```
-
-## Visualize radars
-
-### Input file
-
-`input.json`
-
-### Installation
-
-```bash
-pip install matplotlib geographiclib
-```
-
-### Usage
-
-```bash
-python3 visualize_radars.py
 ```
 
 ## Sample `input.json`
