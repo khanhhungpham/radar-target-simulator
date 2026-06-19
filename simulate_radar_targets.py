@@ -489,17 +489,20 @@ def calculate_radar_record(
     radar: Radar,
     target: Target,
     detection: RadarDetection,
-    min_angle: float,
-    max_angle: float,
+    start_radar_scan_angle_deg: float,
+    end_radar_scan_angle_deg: float,
     timestamp: str,
 ) -> RadarRecord | None:
     true_bearing_deg = detection.bearing_deg
 
-    if min_angle < max_angle:
-        is_in_scan_sector = min_angle <= true_bearing_deg < max_angle
+    if start_radar_scan_angle_deg < end_radar_scan_angle_deg:
+        is_in_scan_sector = (
+            start_radar_scan_angle_deg <= true_bearing_deg < end_radar_scan_angle_deg
+        )
     else:
         is_in_scan_sector = (
-            true_bearing_deg >= min_angle or true_bearing_deg < max_angle
+            true_bearing_deg >= start_radar_scan_angle_deg
+            or true_bearing_deg < end_radar_scan_angle_deg
         )
 
     if not is_in_scan_sector:
@@ -577,14 +580,16 @@ def main():
     csv_headers = [
         "timestamp",
         "radar_id",
+        "radar_lat",
+        "radar_lon",
         "local_target_id",
         "true_target_id",
         "distance_km",
         "bearing_deg",
-        "speed_knots",
-        "course_deg",
-        "lat",
-        "lon",
+        "target_speed_knots",
+        "target_course_deg",
+        "target_lat",
+        "target_lon",
     ]
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
@@ -598,11 +603,13 @@ def main():
 
             for radar in radars:
                 scan_period_s = radar.scan_period_s
-                previous_position_in_cycle = (step - 1) % scan_period_s
-                current_position_in_cycle = step % scan_period_s
 
-                min_angle = (previous_position_in_cycle / scan_period_s) * MAX_ANGLE_DEG
-                max_angle = (current_position_in_cycle / scan_period_s) * MAX_ANGLE_DEG
+                start_radar_scan_angle_deg = (
+                    ((step - 1) % scan_period_s) / scan_period_s
+                ) * MAX_ANGLE_DEG
+                end_radar_scan_angle_deg = (
+                    (step % scan_period_s) / scan_period_s
+                ) * MAX_ANGLE_DEG
 
                 detected_targets: list[DetectedTarget] = []
 
@@ -624,8 +631,8 @@ def main():
                         radar,
                         detected_target.target,
                         detected_target.detection,
-                        min_angle,
-                        max_angle,
+                        start_radar_scan_angle_deg,
+                        end_radar_scan_angle_deg,
                         timestamp,
                     )
 
@@ -634,6 +641,8 @@ def main():
                             [
                                 radar_record.timestamp,
                                 radar_record.radar_id,
+                                radar.lat,
+                                radar.lon,
                                 radar_record.local_target_id,
                                 radar_record.true_target_id,
                                 radar_record.dist_km,
