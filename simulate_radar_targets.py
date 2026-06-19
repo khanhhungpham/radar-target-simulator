@@ -207,7 +207,9 @@ def calculate_num_close_target_pairs(
 def get_random_position_in_radar_range(
     radars: list[Radar],
 ) -> tuple[float, float]:
-    while True:
+    MAX_POSITION_GENERATION_ATTEMPTS = 10000
+
+    for _ in range(MAX_POSITION_GENERATION_ATTEMPTS):
         selected_radar = random.choice(radars)
 
         rand_dist_km = random.uniform(
@@ -238,8 +240,12 @@ def get_random_position_in_radar_range(
                     is_valid = False
                     break
 
-            if is_valid:
-                return lat, lon
+        if is_valid:
+            return lat, lon
+
+    raise RuntimeError(
+        f"[ERROR] Failed to generate a target position after ${MAX_POSITION_GENERATION_ATTEMPTS} attempts"
+    )
 
 
 def append_close_target_pair(
