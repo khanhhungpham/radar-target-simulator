@@ -11,13 +11,13 @@
 ## Installation
 
 ```bash
-pip install pydantic geopy
+pip install pydantic geographiclib
 ```
 
 ## Usage
 
 ```bash
-python3 simulate_radar_targets.py
+python simulate_radar_targets.py
 ```
 
 ## Sample `input.json`
