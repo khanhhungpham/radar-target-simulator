@@ -17,7 +17,7 @@ pip install pydantic geographiclib
 ## Usage
 
 ```bash
-python simulate_radar_targets.py
+python3 simulate_radar_targets.py
 ```
 
 ## Sample `input.json`

@@ -135,16 +135,13 @@ class DetectedTarget:
 
 @dataclass
 class RadarRecord:
-    timestamp: str
-    radar_id: int
     local_target_id: int
-    true_target_id: int
     dist_km: float
     bearing_deg: float
     speed_knots: float
     course_deg: float
-    lat: float
-    lon: float
+    target_lat: float
+    target_lon: float
 
 
 # Geodesic helpers
@@ -486,12 +483,13 @@ def apply_radar_resolution_filter(
 
 
 def calculate_radar_record(
-    radar: Radar,
+    radar_id: int,
+    radar_lat: float,
+    radar_lon: float,
     target: Target,
     detection: RadarDetection,
     start_radar_scan_angle_deg: float,
     end_radar_scan_angle_deg: float,
-    timestamp: str,
 ) -> RadarRecord | None:
     true_bearing_deg = detection.bearing_deg
 
@@ -508,9 +506,7 @@ def calculate_radar_record(
     if not is_in_scan_sector:
         return None
 
-    radar_id = radar.id
-    true_target_id = target.id
-    local_target_id = true_target_id + radar_id * (MAX_TARGETS + 1)
+    local_target_id = target.id + radar_id * (MAX_TARGETS + 1)
 
     noisy_dist_km = max(
         0.0, detection.distance_km + random.gauss(0, SIGMA_RADAR_DIST_KM)
@@ -526,23 +522,20 @@ def calculate_radar_record(
     ) % MAX_ANGLE_DEG
 
     noisy_lat, noisy_lon = move_position(
-        radar.lat,
-        radar.lon,
+        radar_lat,
+        radar_lon,
         noisy_bearing_deg,
         noisy_dist_km * KM_TO_M,
     )
 
     return RadarRecord(
-        timestamp=timestamp,
-        radar_id=radar_id,
         local_target_id=local_target_id,
-        true_target_id=true_target_id,
         dist_km=round(noisy_dist_km, ROUND_DIST_KM_DIGITS),
         bearing_deg=round(noisy_bearing_deg, ROUND_BEARING_DEG_DIGITS),
         speed_knots=round(noisy_speed_knots, ROUND_SPEED_KNOTS_DIGITS),
         course_deg=round(noisy_course_deg, ROUND_COURSE_DEG_DIGITS),
-        lat=round(noisy_lat, ROUND_LAT_LON_DIGITS),
-        lon=round(noisy_lon, ROUND_LAT_LON_DIGITS),
+        target_lat=round(noisy_lat, ROUND_LAT_LON_DIGITS),
+        target_lon=round(noisy_lon, ROUND_LAT_LON_DIGITS),
     )
 
 
@@ -566,7 +559,7 @@ def main():
     print(f"[INFO] Number of targets: {num_targets}")
 
     duration_s = config.simulation_duration_s
-    print(f"[INFO] Simulation duration : {duration_s}s")
+    print(f"[INFO] Simulation duration: {duration_s} seconds")
 
     start_time = datetime.now()
     start_time_s = start_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -592,6 +585,7 @@ def main():
         "target_lon",
     ]
 
+    print("[INFO] Simulation starting...")
     with open(output_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(csv_headers)
@@ -618,8 +612,8 @@ def main():
                     if radar_detection:
                         detected_targets.append(
                             DetectedTarget(
-                                detection=radar_detection,
                                 target=target,
+                                detection=radar_detection,
                             )
                         )
 
@@ -628,29 +622,30 @@ def main():
                 )
                 for detected_target in filtered_detected_targets:
                     radar_record = calculate_radar_record(
-                        radar,
+                        radar.id,
+                        radar.lat,
+                        radar.lon,
                         detected_target.target,
                         detected_target.detection,
                         start_radar_scan_angle_deg,
                         end_radar_scan_angle_deg,
-                        timestamp,
                     )
 
                     if radar_record:
                         step_records.append(
                             [
-                                radar_record.timestamp,
-                                radar_record.radar_id,
+                                timestamp,
+                                radar.id,
                                 radar.lat,
                                 radar.lon,
                                 radar_record.local_target_id,
-                                radar_record.true_target_id,
+                                target.id,
                                 radar_record.dist_km,
                                 radar_record.bearing_deg,
                                 radar_record.speed_knots,
                                 radar_record.course_deg,
-                                radar_record.lat,
-                                radar_record.lon,
+                                radar_record.target_lat,
+                                radar_record.target_lon,
                             ]
                         )
 
