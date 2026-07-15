@@ -136,6 +136,7 @@ class DetectedTarget:
 @dataclass
 class RadarRecord:
     local_target_id: int
+    true_target_id: int
     dist_km: float
     bearing_deg: float
     speed_knots: float
@@ -530,6 +531,7 @@ def calculate_radar_record(
 
     return RadarRecord(
         local_target_id=local_target_id,
+        true_target_id=target.id,
         dist_km=round(noisy_dist_km, ROUND_DIST_KM_DIGITS),
         bearing_deg=round(noisy_bearing_deg, ROUND_BEARING_DEG_DIGITS),
         speed_knots=round(noisy_speed_knots, ROUND_SPEED_KNOTS_DIGITS),
@@ -639,7 +641,7 @@ def main():
                                 radar.lat,
                                 radar.lon,
                                 radar_record.local_target_id,
-                                target.id,
+                                radar_record.true_target_id,
                                 radar_record.dist_km,
                                 radar_record.bearing_deg,
                                 radar_record.speed_knots,
